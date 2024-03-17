@@ -175,18 +175,136 @@ function checkUserReg() {
     fi
 }
 
+function autoGetExeArch() {
+    exeArch=32
+    for file in "$gamePath/"*.exe; do
+        if [[ $(file "$file") =~ x86-64 ]]; then
+            exeArch=64
+            break
+        fi
+    done
+}
+
+function installVulkan() {
+    echo "Does the game use the Vulkan API? (using Proton 8.0 or later is required!)"
+    if [[ $(checkStdin "(y/n): " "^(y|n)$") == "y" ]]; then
+
+        if [[ -z ${DISPLAY}${WAYLAND_DISPLAY} ]]; then
+            printErr "Please run the script from the Desktop."
+            exit 1
+
+        else
+            getSteamID
+            autoGetExeArch
+
+            echo "We have detected the game is $exeArch bits, is this correct?"
+            if [[ $(checkStdin "(y/n) " "^(y|n)$") == "n" ]]; then
+                echo "Specify if the game's EXE file architecture is 32 or 64 bits:"
+                [[ $(checkStdin "(32/64) " "^(32|64)$") == 64 ]] && exeArch=64 || exeArch=32
+            fi
+
+            echo "$SEPERATOR"
+
+            #EXECUTION ORDER MATTERS!
+
+            checkUserReg "Add \"vulkan-1\" and make sure it is set to \"native,builtin\"."
+
+            if [[ -f $regFile ]] && [[ $(grep -Po "^\"vulkan-1\"=\"native,builtin\"" "$regFile") == "" ]]; then
+                echo "Adding dll override for vulkan-1."
+                sed -i '/\[Software\\\\Wine\\\\DllOverrides\].*/a \"vulkan-1\"=\"native,builtin\"' "$regFile"
+            fi
+
+#            echo -e "$SEPERATOR\nInstalling VCRedist 2022..."
+#
+#            flatpak run com.github.Matoking.protontricks --no-runtime --background-wineserver -c "winetricks -f -q vcrun2022" $SteamID 2>/dev/null
+
+            cd "$VULKAN_RT_DL_PATH"
+
+            echo -e "$SEPERATOR\nGetting latest Vulkan version..."
+
+            LATEST_VULKAN_VER=$(curl -s https://vulkan.lunarg.com/sdk/latest/windows.json | grep -Po "\d+\.\d+\.\d+\.\d+")
+
+            if [[ $? != 0 ]]; then
+                printErr "Could not get latest Vulkan version."
+            fi
+
+            echo "Latest Vulkan version is: \"$LATEST_VULKAN_VER\""
+
+            echo -e "$SEPERATOR\nDownloading latest Vulkan Runtime..."
+            VULKAN_RT_INSTALLER="VulkanRT-$LATEST_VULKAN_VER-Installer.exe"
+
+            if [[ ! -f $VULKAN_RT_INSTALLER ]]; then
+                curl -sLO https://sdk.lunarg.com/sdk/download/$LATEST_VULKAN_VER/windows/$VULKAN_RT_INSTALLER \
+                || printErr "Could not download latest Vulkan Runtime."
+            else
+                echo "Latest version already downloaded."
+            fi
+
+            echo -e "\nInstalling latest Vulkan Runtime..."
+
+            flatpak run --command=protontricks-launch com.github.Matoking.protontricks --no-runtime --background-wineserver --appid $SteamID "$VULKAN_RT_DL_PATH/$VULKAN_RT_INSTALLER" /S 2>/dev/null \
+            || printErr "While trying to install latest Vulkan Runtime."
+
+            echo -e "$SEPERATOR\nInstalling ReShade's Vulkan layer..."
+
+            regCmd="wine reg ADD \"HKLM\SOFTWARE\Khronos\Vulkan\ImplicitLayers\" /d 0 /t REG_DWORD /v \"Z:\home\\${USER}\.reshade\reshade\ReShade${exeArch}.json\" /f /reg:${exeArch}"
+            flatpak run com.github.Matoking.protontricks --no-runtime --background-wineserver -c "${regCmd}" ${SteamID} 2>/dev/null \
+            || printErr "While trying to install ReShade's Vulkan layer."
+
+            echo -e "$SEPERATOR\nSetting up ReShade..."
+
+            presetPath="${PRESETS_PATH}/${SteamID}.ini"
+            logPath="${LOGS_PATH}/${SteamID}.log"
+
+            touch "$(realpath $presetPath)"
+            touch "$(realpath $logPath)"
+
+            ln -is "$(realpath $INI_PATH)"   "$gamePath/ReShade.ini"
+            ln -is "$(realpath $presetPath)" "$gamePath/ReShadePreset.ini"
+            ln -is "$(realpath $logPath)"    "$gamePath/ReShade.log"
+            ln -is "$(realpath "$MAIN_PATH"/reshade-shaders/Textures)" "$gamePath/"
+            ln -is "$(realpath "$MAIN_PATH"/reshade-shaders/Shaders)"  "$gamePath/"
+
+#            echo "Run the game once and then execute this:"
+#            echo "protontricks -c \"wine reg ADD \\\"HKLM\SOFTWARE\Khronos\Vulkan\ImplicitLayers\\\" /d 0 /t REG_DWORD /v \\\"Z:\home\\${USER}\.reshade\reshade\ReShade${exeArch}.json\\\" /f /reg:64\" $SteamID"
+        fi
+
+        if [[ $? == 0 ]]; then
+            echo "Done."
+            exit 0
+        else
+            echo "An error has occured."
+            exit 1
+        fi
+    fi
+}
+
 SEPERATOR="------------------------------------------------------------------------------------------------"
 
 OVERRIDE_REGEX='"OVERRIDE"="native,builtin"'
-COMMON_OVERRIDES="d3d8 d3d9 d3d11 ddraw dinput8 dxgi opengl32"
+COMMON_OVERRIDES="d3d8 d3d9 d3d11 d3d12 ddraw dinput8 dxgi opengl32 vulkan-1"
 
 echo -e "$SEPERATOR\nReShade installer/updater for Steam and proton on Linux.\n$SEPERATOR\n"
 
 MAIN_PATH=${MAIN_PATH:-~/".reshade"}
 RESHADE_PATH="$MAIN_PATH/reshade"
+INI_PATH="$MAIN_PATH/ReShade.ini"
+LOGS_PATH="$MAIN_PATH/logs"
+PRESETS_PATH="$MAIN_PATH/presets"
+
+VULKAN_RT_DL_PATH="/home/$USER/Downloads"
 
 mkdir -p "$MAIN_PATH" || printErr "Unable to create directory '$MAIN_PATH'."
 cd "$MAIN_PATH" || exit
+
+if [[ ! -f $INI_PATH ]]; then
+    echo -e "[GENERAL]\nEffectSearchPaths=.\Shaders\**\nTextureSearchPaths=.\Textures\**" > "$(realpath $INI_PATH)"
+    unix2dos "$(realpath $INI_PATH)" 2>/dev/null 1>/dev/null \
+    || printErr "While trying to create the default ReShade.ini."
+fi
+
+mkdir -p "$LOGS_PATH"    || printErr "Unable to create directory '$LOGS_PATH'."
+mkdir -p "$PRESETS_PATH" || printErr "Unable to create directory '$PRESETS_PATH'."
 
 UPDATE_RESHADE=${UPDATE_RESHADE:-1}
 D3DCOMPILER=${D3DCOMPILER:-1}
@@ -196,14 +314,14 @@ if [[ $(checkStdin "(i/u): " "^(i|u)$") == "u" ]]; then
     getGamePath
     getSteamID
     echo "Unlinking ReShade files."
-    LINKS="$(echo "$COMMON_OVERRIDES" | sed 's/ /.dll /g' | sed 's/$/.dll/') ReShade32.json ReShade64.json Shaders Textures"
+    LINKS="$(echo "$COMMON_OVERRIDES" | sed 's/ /.dll /g' | sed 's/$/.dll/') Shaders Textures ReShade.ini ReShade.log ReShadePreset.ini"
     for link in $LINKS; do
         if [[ -L $gamePath/$link ]]; then
             echo "Unlinking \"$gamePath/$link\"."
             unlink "$gamePath/$link"
         fi
     done
-    
+
     echo "Removing dll overrides."
     checkUserReg "remove overrides for ${COMMON_OVERRIDES// /, })"
     if [[ -f $regFile ]]; then
@@ -216,6 +334,14 @@ if [[ $(checkStdin "(i/u): " "^(i|u)$") == "u" ]]; then
             fi
         done
     fi
+
+    echo "Removing ReShade Vulkan layer."
+    regCmd="wine reg DELETE \"HKLM\SOFTWARE\Khronos\Vulkan\ImplicitLayers\" /f"
+    flatpak run com.github.Matoking.protontricks -c "$regCmd /reg:64" $SteamID \
+    || printErr "While trying to uninstall ReShade's Vulkan layer."
+    flatpak run com.github.Matoking.protontricks -c "$regCmd /reg:32" $SteamID \
+    || printErr "While trying to uninstall ReShade's Vulkan layer."
+
     echo "Finished uninstalling ReShade for SteamID $SteamID."
     exit 0
 fi
@@ -235,7 +361,7 @@ mkdir -p "$RESHADE_PATH"
 
 [[ -f VERS ]] && VERS=$(cat VERS) || VERS=0
 
-if [[ ! -f reshade/dxgi.dll ]] || [[ $UPDATE_RESHADE -eq 1 ]]; then
+if [[ ! -f reshade/ReShade64.dll ]] || [[ $UPDATE_RESHADE -eq 1 ]]; then
     echo -e "Checking for Reshade updates.\n$SEPERATOR"
     RVERS=$(curl -sL https://reshade.me | grep -Po "downloads/ReShade_Setup_[\d.]+\.exe" | head -n1)
     if [[ $RVERS == "" ]]; then
@@ -251,8 +377,6 @@ if [[ ! -f reshade/dxgi.dll ]] || [[ $UPDATE_RESHADE -eq 1 ]]; then
             printErr "Download of ReShade exe file failed."
         fi
         7z -y e "$exeFile" 1> /dev/null || printErr "Failed to extract ReShade using 7z."
-        mv ./*32.dll d3d9.dll
-        mv ./*64.dll dxgi.dll
         rm -f "$exeFile"
         rm -rf "${RESHADE_PATH:?}"/*
         mv ./* "$RESHADE_PATH/"
@@ -264,18 +388,16 @@ fi
 
 getGamePath
 
+installVulkan
+
+exit 1
+
 echo "Do you want $0 to attempt to automatically detect the right dll to use for ReShade?"
 
 [[ $(checkStdin "(y/n) " "^(y|n)$") == "y" ]] && wantedDll="auto" || wantedDll="manual"
 
 if [[ $wantedDll == "auto" ]]; then
-    exeArch=32
-    for file in "$gamePath/"*.exe; do
-        if [[ $(file "$file") =~ x86-64 ]]; then
-            exeArch=64
-            break
-        fi
-    done
+    autoGetExeArch
     [[ $exeArch -eq 32 ]] && wantedDll="d3d9" || wantedDll="dxgi"
     echo "We have detected the game is $exeArch bits, we will use $wantedDll.dll as the override, is this correct?"
     if [[ $(checkStdin "(y/n) " "^(y|n)$") == "n" ]]; then
@@ -313,16 +435,15 @@ fi
 echo "Linking ReShade files to game directory."
 
 if [[ $wantedDll == "d3d9" ]]; then
-    ln -is "$(realpath "$RESHADE_PATH"/d3d9.dll)" "$gamePath/"
+    echo "Linking ReShade32.dll as $wantedDll.dll."
+    ln -is "$(realpath "$RESHADE_PATH"/ReShade32.dll)" "$gamePath/$wantedDll.dll"
 else
-    echo "Linking dxgi.dll as $wantedDll.dll."
-    ln -is "$(realpath "$RESHADE_PATH"/dxgi.dll)" "$gamePath/$wantedDll.dll"
+    echo "Linking ReShade64.dll as $wantedDll.dll."
+    ln -is "$(realpath "$RESHADE_PATH"/ReShade64.dll)" "$gamePath/$wantedDll.dll"
 fi
 
-ln -is "$(realpath "$RESHADE_PATH"/ReShade32.json)" "$gamePath/"
-ln -is "$(realpath "$RESHADE_PATH"/ReShade64.json)" "$gamePath/"
 ln -is "$(realpath "$MAIN_PATH"/reshade-shaders/Textures)" "$gamePath/"
-ln -is "$(realpath "$MAIN_PATH"/reshade-shaders/Shaders)" "$gamePath/"
+ln -is "$(realpath "$MAIN_PATH"/reshade-shaders/Shaders)"  "$gamePath/"
 
 echo -e "$SEPERATOR\nDone."
 echo "The next time you start the game, open the ReShade settings, go to the 'Settings' tab, add the Shaders folder location to the 'Effect Search Paths', add the Textures folder to the 'Texture Search Paths', go to the 'Home' tab, click 'Reload'."
