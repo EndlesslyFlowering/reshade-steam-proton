@@ -38,6 +38,9 @@ cat > /dev/null <<DESCRIPTION
         protontricks
         git
 
+    Optional:
+        objdump
+
     Notes:
         Overriding and installing the d3dcompiler_47 dll seems to occasionally fail with proton-ge under protontricks, switch
         to Steam's proton before running, you can switch back to proton-ge after.
@@ -178,7 +181,7 @@ function uninstallReShade() {
             pattern=${OVERRIDE_REGEX//OVERRIDE/$override}
             if [[ $(grep -Po "$pattern" "$regFile") != "" ]]; then
                 pattern="s/$pattern\n//g"
-                echo "Removing dll override (sed -zi '$pattern' \"$regFile\")."
+                echo "Removing dll override for \"$override\"."
                 sed -zi "$pattern" "$regFile"
             fi
         done
@@ -363,7 +366,7 @@ function getGamePath() {
 }
 
 function getSteamID() {
-    echo -e '$SEPERATOR\nPlease supply the SteamID of the game (To find the SteamID, run: protontricks -s Name_Of_Game).'
+    echo -e "$SEPERATOR\nPlease supply the SteamID of the game (To find the SteamID, run: protontricks -s Name_Of_Game)."
     echo '(Control+c to exit)'
     SteamID=$(checkStdin "SteamID: " "^[0-9]*$")
 }
@@ -387,6 +390,53 @@ function autoGetExeArch() {
             break
         fi
     done
+
+    echo -e "$SEPERATOR\nWe have detected the game is $exeArch bits, is this correct?"
+    if [[ $(checkStdin "(y/n): " "^(y|n)$") == "n" ]]; then
+        echo "Specify if the game's EXE file architecture is 32 or 64 bits:"
+        [[ $(checkStdin "(32/64) " "^(32|64)$") == 64 ]] && exeArch=64 || exeArch=32
+    fi
+}
+
+function checkPCGW() {
+    echo "Also check the entry for the game on https://www.pcgamingwiki.com/ if unsure."
+}
+
+function enterManualDllOverride() {
+    checkPCGW
+    while true; do
+        read -rp 'Override: ' wantedDll
+        wantedDll=${wantedDll//.dll/}
+        echo "You have entered '$wantedDll', is this correct?"
+        read -rp '(y/n): ' ynCheck
+        if [[ $ynCheck =~ ^(y|Y|yes|YES)$ ]]; then
+            break
+        fi
+    done
+}
+
+function addDllOverride() {
+    if [[ -f $regFile ]] && [[ $(grep -Po "^\"${1}\"=\"native,builtin\"" "$regFile") == "" ]]; then
+        echo -e "$SEPERATOR\nAdding dll override for ${1}."
+        api="$1"
+        sed -ie '/\[Software\\\\Wine\\\\DllOverrides\].*/a \"'$api'\"=\"native,builtin\"' "$regFile"
+    fi
+}
+
+function setupReShadeFiles() {
+    echo -e "$SEPERATOR\nLinking ReShade files to game directory."
+
+    presetPath="${PRESETS_PATH}/${SteamID}.ini"
+    logPath="${LOGS_PATH}/${SteamID}.log"
+
+    touch "$(realpath $presetPath)"
+    touch "$(realpath $logPath)"
+
+    ln -is "$(realpath $INI_PATH)"   "$gamePath/ReShade.ini"
+    ln -is "$(realpath $presetPath)" "$gamePath/ReShadePreset.ini"
+    ln -is "$(realpath $logPath)"    "$gamePath/ReShade.log"
+    ln -is "$(realpath "$MAIN_PATH"/reshade-shaders/Textures)" "$gamePath/"
+    ln -is "$(realpath "$MAIN_PATH"/reshade-shaders/Shaders)"  "$gamePath/"
 }
 
 function installVulkan() {
@@ -398,23 +448,13 @@ function installVulkan() {
 #            exit 1
 #
 #        else
-            getSteamID
-            autoGetExeArch
-
-            echo -e "$SEPERATOR\nWe have detected the game is $exeArch bits, is this correct?"
-            if [[ $(checkStdin "(y/n): " "^(y|n)$") == "n" ]]; then
-                echo "Specify if the game's EXE file architecture is 32 or 64 bits:"
-                [[ $(checkStdin "(32/64) " "^(32|64)$") == 64 ]] && exeArch=64 || exeArch=32
-            fi
 
             #EXECUTION ORDER MATTERS!
+            #dll override needs to be added before protontricks is called
 
             checkUserReg "Add \"vulkan-1\" and make sure it is set to \"native,builtin\"."
 
-            if [[ -f $regFile ]] && [[ $(grep -Po "^\"vulkan-1\"=\"native,builtin\"" "$regFile") == "" ]]; then
-                echo -e "$SEPERATOR\nAdding dll override for vulkan-1."
-                sed -i '/\[Software\\\\Wine\\\\DllOverrides\].*/a \"vulkan-1\"=\"native,builtin\"' "$regFile"
-            fi
+            addDllOverride "vulkan-1"
 
 #            echo -e "$SEPERATOR\nInstalling VCRedist 2022..."
 #
@@ -453,19 +493,7 @@ function installVulkan() {
             $PROTONTRICKS --no-runtime --background-wineserver -c "${regCmd}" ${SteamID} 2>/dev/null \
             || printErr "Could not install ReShade's Vulkan layer."
 
-            echo -e "$SEPERATOR\nSetting up ReShade..."
-
-            presetPath="${PRESETS_PATH}/${SteamID}.ini"
-            logPath="${LOGS_PATH}/${SteamID}.log"
-
-            touch "$(realpath $presetPath)"
-            touch "$(realpath $logPath)"
-
-            ln -is "$(realpath $INI_PATH)"   "$gamePath/ReShade.ini"
-            ln -is "$(realpath $presetPath)" "$gamePath/ReShadePreset.ini"
-            ln -is "$(realpath $logPath)"    "$gamePath/ReShade.log"
-            ln -is "$(realpath "$MAIN_PATH"/reshade-shaders/Textures)" "$gamePath/"
-            ln -is "$(realpath "$MAIN_PATH"/reshade-shaders/Shaders)"  "$gamePath/"
+            setupReShadeFiles
 
 #            echo "Run the game once and then execute this:"
 #            echo "protontricks -c \"wine reg ADD \\\"HKLM\SOFTWARE\Khronos\Vulkan\ImplicitLayers\\\" /d 0 /t REG_DWORD /v \\\"Z:\home\\${USER}\.reshade\reshade\ReShade${exeArch}.json\\\" /f /reg:64\" $SteamID"
@@ -512,7 +540,6 @@ mkdir -p "$LOGS_PATH"         || printErr "Unable to create directory '$LOGS_PAT
 mkdir -p "$RESHADE_SHADERS_PATH/Shaders"  || printErr "Unable to create directory '$RESHADE_SHADERS_PATH/Shaders'."
 mkdir -p "$RESHADE_SHADERS_PATH/Textures" || printErr "Unable to create directory '$RESHADE_SHADERS_PATH/Textures'."
 
-
 #check if protontricks is installed
 flatpak info --show-ref com.github.Matoking.protontricks 1>/dev/null 2>/dev/null
 if [[ $? == 0 ]]; then
@@ -523,6 +550,18 @@ else
     hash protontricks-launch 1>/dev/null 2>/dev/null || printErr "protontricks-launch not found!"
     PROTONTRICKS="protontricks"
     PROTONTRICKS_LAUNCH="protontricks-launch"
+fi
+
+hash objdump
+if [[ $? == 0 ]]; then
+    GET_WANTED_DLL="objdump -x"
+else
+    hash strings || echo "Auto detection of DLLs needed disabled as both \"objdump\" and \"string\" were not found."
+    if [[ $? == 0 ]]; then
+        GET_WANTED_DLL="strings"
+    else
+        GET_WANTED_DLL=""
+    fi
 fi
 
 #create default ReShade.ini if needed
@@ -589,64 +628,109 @@ done
 
 getGamePath
 
+autoGetExeArch
+
+getSteamID
+
 installVulkan
 
-echo "d3d part of the script currently not functional..."
-
-exit 1
-
-echo "Do you want $0 to attempt to automatically detect the right dll to use for ReShade?"
+echo "Do you want the script to attempt to automatically detect the right dll to use for ReShade?"
 
 [[ $(checkStdin "(y/n): " "^(y|n)$") == "y" ]] && wantedDll="auto" || wantedDll="manual"
 
 if [[ $wantedDll == "auto" ]]; then
-    autoGetExeArch
-    [[ $exeArch -eq 32 ]] && wantedDll="d3d9" || wantedDll="dxgi"
-    echo "We have detected the game is $exeArch bits, we will use $wantedDll.dll as the override, is this correct?"
-    if [[ $(checkStdin "(y/n): " "^(y|n)$") == "n" ]]; then
+
+    if [[ $GET_WANTED_DLL != "" ]]; then
+        if [[ $exeArch -eq 64 ]]; then
+            exeInternalArch="x86-64"
+        else
+            exeInternalArch="80386"
+        fi
+
+        possibleWantedDlls=()
+
+        for file in "$gamePath/"{*.exe,*.dll} "$gamePath/"**/{*.exe,*.dll}; do
+            if [[ $(file "$file") =~ $exeInternalArch ]]; then
+                testDlls=$($GET_WANTED_DLL "${file}" | grep -Po "[^ ]*\.[DdLl]{3}" | tr '[:upper:]' '[:lower:]')
+
+                for override in $COMMON_OVERRIDES; do
+                    for testDll in $testDlls; do
+                        if [[ $testDll == *"$override"* ]]; then
+                            possibleWantedDlls+=( $testDll )
+                        fi
+                    done
+                done
+            fi
+        done
+
+        echo "$SEPERATOR"
+
+        if [[ ${#possibleWantedDlls[@]} -eq 0 ]]; then
+            echo "No dlls detected. Switching to manual mode."
+            wantedDll="manual"
+        elif [[ ${#possibleWantedDlls[@]} -eq 1 ]]; then
+            echo "We have detected the game needs \"${possibleWantedDlls[0]}\" as dll override, is this correct?"
+            checkPCGW
+            if [[ $(checkStdin "(y/n): " "^(y|n)$") == "n" ]]; then
+                wantedDll="manual"
+            else
+                wantedDll="${possibleWantedDlls[0]}"
+            fi
+        elif [ ${#possibleWantedDlls[@]} -eq 2 ] \
+          && ([ ${possibleWantedDlls[0]} == "dxgi" && ${possibleWantedDlls[1]} == "d3d11" ] \
+           || [ ${possibleWantedDlls[1]} == "dxgi" && ${possibleWantedDlls[0]} == "d3d11" ]); then
+
+            echo "We have detected the game needs \"dxgi.dll\" or \"d3d11.dll\" as dll override. Which one do you want? Use \"dxgi.dll\" if unsure."
+            checkPCGW
+            [[ $(checkStdin "(dxgi/d3d11) " "^(dxgi|d3d11)$") == "dxgi" ]] && wantedDll="dxgi" || wantedDll="d3d11"
+
+        elif [ ${#possibleWantedDlls[@]} -eq 2 ] \
+          && ([ ${possibleWantedDlls[0]} == "dxgi" && ${possibleWantedDlls[1]} == "d3d12" ] \
+           || [ ${possibleWantedDlls[1]} == "dxgi" && ${possibleWantedDlls[0]} == "d3d12" ]); then
+
+            echo "We have detected the game needs \"dxgi.dll\" or \"d3d12.dll\" as dll override. Which one do you want? Use \"dxgi.dll\" if unsure."
+            checkPCGW
+            [[ $(checkStdin "(dxgi/d3d12) " "^(dxgi|d3d12)$") == "dxgi" ]] && wantedDll="dxgi" || wantedDll="d3d12"
+
+        else
+            echo "We found the following possible dll overrides:"
+            for possibleDll in ${possibleWantedDlls[@]}; do
+                echo "$possibleDll"
+            done
+            echo "Enter the dll override the game needs. If both dxgi and d3d11 or d3d12 are present try using dxgi first."
+            enterManualDllOverride
+        fi
+    else
         wantedDll="manual"
     fi
 fi
 
 if [[ $wantedDll == "manual" ]]; then
     echo "Manually enter the dll override for ReShade, common values are one of: $COMMON_OVERRIDES"
-    while true; do
-        read -rp 'Override: ' wantedDll
-        wantedDll=${wantedDll//.dll/}
-        echo "You have entered '$wantedDll', is this correct?"
-        read -rp '(y/n): ' ynCheck
-        if [[ $ynCheck =~ ^(y|Y|yes|YES)$ ]]; then
-            break
-        fi
-    done
+    enterManualDllOverride
 fi
 
-getSteamID
+#EXECUTION ORDER MATTERS!
+#dll override needs to be added before protontricks is called
+
+checkUserReg "Add $wantedDll and make sure it is set to \"native,builtin\"."
+
+addDllOverride "$wantedDll"
 
 if [[ $D3DCOMPILER -eq 1 ]]; then
     echo -e "$SEPERATOR\nInstalling d3dcompiler_47 using protontricks."
-    $PROTONTRICKS "$SteamID" d3dcompiler_47
+    $PROTONTRICKS $SteamID d3dcompiler_47
 fi
 
-checkUserReg "Add $wantedDll and make sure it is set to  \"native,builtin\"."
-
-if [[ -f $regFile ]] && [[ $(grep -Po "^\"$wantedDll\"=\"native,builtin\"" "$regFile") == "" ]]; then
-    echo "Adding dll override for $wantedDll."
-    sed -i "s/^\"\*d3dcompiler_47\"=\"native\"/\0\n\"$wantedDll\"=\"native,builtin\"/" "$regFile"
-fi
-
-echo "Linking ReShade files to game directory."
-
-if [[ $wantedDll == "d3d9" ]]; then
-    echo "Linking ReShade32.dll as $wantedDll.dll."
-    ln -is "$(realpath "$RESHADE_PATH"/ReShade32.dll)" "$gamePath/$wantedDll.dll"
-else
+echo "$SEPERATOR"
+if [[ $exeArch -eq 64 ]]; then
     echo "Linking ReShade64.dll as $wantedDll.dll."
     ln -is "$(realpath "$RESHADE_PATH"/ReShade64.dll)" "$gamePath/$wantedDll.dll"
+else
+    echo "Linking ReShade32.dll as $wantedDll.dll."
+    ln -is "$(realpath "$RESHADE_PATH"/ReShade32.dll)" "$gamePath/$wantedDll.dll"
 fi
 
-ln -is "$(realpath "$MAIN_PATH"/reshade-shaders/Textures)" "$gamePath/"
-ln -is "$(realpath "$MAIN_PATH"/reshade-shaders/Shaders)"  "$gamePath/"
+setupReShadeFiles
 
 echo -e "$SEPERATOR\nDone."
-echo "The next time you start the game, open the ReShade settings, go to the 'Settings' tab, add the Shaders folder location to the 'Effect Search Paths', add the Textures folder to the 'Texture Search Paths', go to the 'Home' tab, click 'Reload'."
